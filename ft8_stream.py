@@ -1,3 +1,20 @@
+"""
+===========================================================================
+SWL FT8/FT4 Live-Logger & ADIF-Generator
+===========================================================================
+Änderungshistorie:
+- v1.0: Basis-Parser für WSJT-X/JTDX UDP-Streams (FT8).
+- v1.1: Locator-Memory hinzugefügt (Filterung von "RR73" als GridSquare).
+- v1.2: QO-100 Satelliten-Support integriert (PROP_MODE und SAT_NAME Tags).
+- v2.0: Dual-Port Engine (simultanes Lauschen auf FT8/2237 und FT4/2238).
+- v2.1: eQSL & Wavelog Fix: <COMMENT> zu <QSLMSG> geändert, <RST_SENT> ergänzt.
+- v3.0: Wavelog Master-DB Integration (know_call_signs.txt): Intelligentes 
+        Limit auf maximal 2 geloggte QSOs pro Rufzeichen und Band.
+- v3.1: QO-100 Club Fix: FT4 wird nun ADIF-konform als <MODE:4>MFSK 
+        und <SUBMODE:3>FT4 exportiert.
+===========================================================================
+"""
+
 import socket
 import struct
 import datetime
@@ -6,7 +23,6 @@ import os
 import select
 
 def get_band(freq_mhz):
-    """Ermittelt das Band anhand der Frequenz in MHz."""
     try:
         freq = float(freq_mhz)
         if 1.8 <= freq <= 2.0: return "160m"
@@ -25,35 +41,24 @@ def get_band(freq_mhz):
         return ""
 
 def clean_callsign(call):
-    if not call:
-        return None
+    if not call: return None
     call = call.replace('<', '').replace('>', '')
     invalid_calls = ['...', 'RR73;', 'RR73', '73', 'RRR', 'CQ', 'WSJT-X', 'JTDX']
-    if call.upper() in invalid_calls or len(call) < 3:
-        return None
-    if not re.match(r'^[A-Z0-9/]+$', call, re.IGNORECASE):
-        return None
+    if call.upper() in invalid_calls or len(call) < 3: return None
+    if not re.match(r'^[A-Z0-9/]+$', call, re.IGNORECASE): return None
     return call
 
 def parse_ft8_message(message):
-    """Filtert NUR abgeschlossene QSOs aus dem Live-Stream."""
     parts = message.strip().split()
-    if len(parts) < 3:
-        return None, None
-        
+    if len(parts) < 3: return None, None
     last_word = parts[-1].upper().rstrip(';')
-    if last_word not in ["73", "RR73", "RRR"]:
-        return None, None
-        
+    if last_word not in ["73", "RR73", "RRR"]: return None, None
     receiver = clean_callsign(parts[0])
     sender = clean_callsign(parts[1])
-    
-    if sender and receiver:
-        return sender, receiver
+    if sender and receiver: return sender, receiver
     return None, None
 
 def parse_qt_string(payload, offset):
-    """Extrahiert einen Qt-formatierten String aus dem Binär-Paket."""
     if offset + 4 > len(payload): return "", offset
     length, = struct.unpack_from('>I', payload, offset)
     offset += 4
@@ -63,12 +68,9 @@ def parse_qt_string(payload, offset):
     return val, offset+length
 
 def parse_wsjtx_packet(payload):
-    """Zerlegt das WSJT-X UDP-Paket manuell über das struct-Modul."""
     if len(payload) < 12: return None
-    
     magic, schema, msg_type = struct.unpack_from('>III', payload, 0)
     if magic != 0xadbccbda: return None
-    
     offset = 12
     client_id, offset = parse_qt_string(payload, offset)
     
@@ -78,7 +80,6 @@ def parse_wsjtx_packet(payload):
         offset += 8
         mode, offset = parse_qt_string(payload, offset)
         return {'type': 'Status', 'freq': dial_freq, 'mode': mode}
-        
     elif msg_type == 2: 
         if offset + 21 > len(payload): return None
         is_new, time_ms, snr, dt, df = struct.unpack_from('>bIidI', payload, offset)
@@ -86,13 +87,11 @@ def parse_wsjtx_packet(payload):
         mode, offset = parse_qt_string(payload, offset)
         message, offset = parse_qt_string(payload, offset)
         return {'type': 'Decode', 'snr': snr, 'mode': mode, 'message': message}
-        
     return None
 
 def format_adif_record(date, time, freq_mhz, mode, snr, callsign, target_callsign, remote_grid):
     band = get_band(freq_mhz)
     comment = f"WKD WD {target_callsign}"    
-    
     my_call = "DL2570SWL" 
     my_grid = "JO30tg"
     
@@ -102,58 +101,79 @@ def format_adif_record(date, time, freq_mhz, mode, snr, callsign, target_callsig
         f"<TIME_ON:6>{time} "
         f"<FREQ:{len(str(freq_mhz))}>{freq_mhz} "
     )
-    
-    if band:
-        adif_str += f"<BAND:{len(band)}>{band} "
+    if band: adif_str += f"<BAND:{len(band)}>{band} "
+        
+    # FIX: ADIF-konforme FT4-Weiche für den QO-100 Dx Club
+    if mode.upper() == "FT4":
+        adif_str += "<MODE:4>MFSK <SUBMODE:3>FT4 "
+    else:
+        adif_str += f"<MODE:{len(mode)}>{mode} "
         
     adif_str += (
-        f"<MODE:{len(mode)}>{mode} "
         f"<RST_RCVD:{len(str(snr))}>{snr} "
-        f"<RST_SENT:{len(str(snr))}>{snr} "
+        f"<RST_SENT:{len(str(snr))}>{snr} "  
         f"<MY_GRIDSQUARE:{len(my_grid)}>{my_grid} "
     )
     
-    if remote_grid:
+    if remote_grid and remote_grid != "RR73": 
         adif_str += f"<GRIDSQUARE:{len(remote_grid)}>{remote_grid} "
         
     if band == "3cm" or (10489.0 <= float(freq_mhz) <= 10490.0):
         adif_str += "<PROP_MODE:3>SAT <SAT_NAME:6>QO-100 "
         
     adif_str += (
-        f"<COMMENT:{len(comment)}>{comment} "
+        f"<QSLMSG:{len(comment)}>{comment} " 
         f"<STATION_CALLSIGN:{len(my_call)}>{my_call} "
         f"<EOR>\n"
     )
     return adif_str
 
+def load_database(filename="know_call_signs.txt"):
+    """Liest die Master-Datenbank ein."""
+    counts = {}
+    if os.path.exists(filename):
+        with open(filename, 'r', encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(',')
+                if len(parts) == 3:
+                    call, band, count = parts
+                    counts[f"{call},{band}"] = int(count)
+    return counts
+
+def save_database(counts, filename="know_call_signs.txt"):
+    """Speichert die aktualisierte Datenbank ab."""
+    with open(filename, 'w', encoding='utf-8') as f:
+        for key, count in counts.items():
+            f.write(f"{key},{count}\n")
+
 def start_swl_server(output_file="swl_live_export.adi"):
     ip = '127.0.0.1'
-    port1 = 2237 # FT8
-    port2 = 2238 # FT4
-    treffer = 0
-    seen_grids = {} 
+    port1 = 2237
+    port2 = 2238
+    db_file = "know_call_signs.txt"
     
-    # Sockets vorbereiten
     sock1 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock1.bind((ip, port1))
-    
     sock2 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock2.bind((ip, port2))
-    
     sockets = [sock1, sock2]
     
-    # Status-Gedächtnis pro Socket, damit FT8 und FT4 sich nicht überschreiben
     current_status = {
-        sock1: {'freq': 10489.552, 'mode': 'FT8', 'name': f"Port {port1}"},
-        sock2: {'freq': 10489.552, 'mode': 'FT4', 'name': f"Port {port2}"}
+        sock1: {'freq': 10489.552, 'mode': 'FT8'},
+        sock2: {'freq': 10489.552, 'mode': 'FT4'}
     }
     
-    print("=" * 60)
-    print(f"Starte Dual-Port Live SWL-Logger auf UDP {ip}")
-    print(f"Lausche auf Port {port1} (FT8) und Port {port2} (FT4)...")
-    print(f"Schreibe zweiseitige QSOs inkl. Locatoren in '{output_file}'")
-    print("Abbruch mit STRG+C")
-    print("=" * 60)
+    seen_grids = {}
+    
+    # Master-Datenbank laden
+    qso_counts = load_database(db_file)
+    bekannte_kombis = len(qso_counts)
+    
+    print("=" * 70)
+    print(f"Starte Dual-Port Live SWL-Logger (Ports {port1} & {port2})")
+    print(f"Limit: Max 2 QSOs pro Rufzeichen & Band.")
+    print(f"Datenbank geladen: {bekannte_kombis} bekannte Stationen aus '{db_file}'.")
+    print("=" * 70)
     
     if not os.path.exists(output_file):
         with open(output_file, 'w', encoding='utf-8') as f:
@@ -164,13 +184,11 @@ def start_swl_server(output_file="swl_live_export.adi"):
     while True:
         try:
             readable, _, _ = select.select(sockets, [], [])
-            
             for s in readable:
                 data, addr = s.recvfrom(2048)
                 pkt = parse_wsjtx_packet(data)
                 
-                if not pkt:
-                    continue
+                if not pkt: continue
                     
                 if pkt['type'] == 'Status':
                     if pkt['freq'] > 0:
@@ -187,40 +205,51 @@ def start_swl_server(output_file="swl_live_export.adi"):
                             sender_cand = clean_callsign(msg_parts[-2])
                             if sender_cand:
                                 seen_grids[sender_cand] = potential_grid
-                                if len(seen_grids) > 5000:
-                                    seen_grids.clear()
+                                if len(seen_grids) > 5000: seen_grids.clear()
 
                     sender, receiver = parse_ft8_message(pkt['message'])
                     
                     if sender:
-                        now = datetime.datetime.utcnow()
-                        date_str = now.strftime("%Y%m%d")
-                        time_str = now.strftime("%H%M%S")
-                        
-                        sender_grid = seen_grids.get(sender, "")
-                        receiver_grid = seen_grids.get(receiver, "")
-                        
                         freq = current_status[s]['freq']
                         mode = current_status[s]['mode']
+                        band = get_band(freq)
                         
-                        record_sender = format_adif_record(
-                            date_str, time_str, freq, mode, 
-                            pkt['snr'], sender, receiver, sender_grid
-                        )
-                        record_receiver = format_adif_record(
-                            date_str, time_str, freq, mode, 
-                            pkt['snr'], receiver, sender, receiver_grid
-                        )
+                        sender_key = f"{sender},{band}"
+                        receiver_key = f"{receiver},{band}"
                         
-                        with open(output_file, 'a', encoding='utf-8') as f:
-                            f.write(record_sender)
-                            f.write(record_receiver)
+                        # Prüfen, ob das Limit (< 2) laut Wavelog-Datenbank erreicht ist
+                        log_sender = qso_counts.get(sender_key, 0) < 2
+                        log_receiver = qso_counts.get(receiver_key, 0) < 2
                         
-                        treffer += 1
-                        print(f"[{time_str} | {mode}] LOG (2x): {sender} ({sender_grid if sender_grid else '?'}) <-> {receiver} ({receiver_grid if receiver_grid else '?'}) (Gesamt: {treffer})")
+                        if log_sender or log_receiver:
+                            now = datetime.datetime.utcnow()
+                            date_str = now.strftime("%Y%m%d")
+                            time_str = now.strftime("%H%M%S")
+                            
+                            sender_grid = seen_grids.get(sender, "")
+                            receiver_grid = seen_grids.get(receiver, "")
+                            
+                            with open(output_file, 'a', encoding='utf-8') as f:
+                                if log_sender:
+                                    f.write(format_adif_record(date_str, time_str, freq, mode, pkt['snr'], sender, receiver, sender_grid))
+                                    qso_counts[sender_key] = qso_counts.get(sender_key, 0) + 1
+                                    
+                                if log_receiver:
+                                    f.write(format_adif_record(date_str, time_str, freq, mode, pkt['snr'], receiver, sender, receiver_grid))
+                                    qso_counts[receiver_key] = qso_counts.get(receiver_key, 0) + 1
+                            
+                            # Update die Datenbank-Datei in Echtzeit
+                            save_database(qso_counts, db_file)
+                            
+                            if log_sender and log_receiver:
+                                print(f"[{time_str} | {band}] LOG: {sender} <-> {receiver}")
+                            elif log_sender:
+                                print(f"[{time_str} | {band}] LOG: {sender} (Ignoriere {receiver}, Limit erreicht)")
+                            elif log_receiver:
+                                print(f"[{time_str} | {band}] LOG: {receiver} (Ignoriere {sender}, Limit erreicht)")
                         
         except KeyboardInterrupt:
-            print("\nLive-Logger beendet. Bis zum nächsten Mal!")
+            print("\nLive-Logger beendet.")
             break
         except Exception:
             continue
