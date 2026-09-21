@@ -5,13 +5,10 @@ Wavelog ADIF Cleaner & eQSL Upgrader
 Änderungshistorie:
 - v1.0: Basis-Skript zum Ersetzen von COMMENT zu QSLMSG und RST-Fix.
 - v2.0: Intelligenter Filter eingebaut: Max 3 QSOs pro Rufzeichen/Band.
-        VIP-Logik für eQSL-Bestätigungen (verhindert Datenverlust).
-- v2.1: FT4-Fix integriert (wandelt FT4 in MFSK/FT4 für QO-100 Club um).
-- v2.2: Hardcore-Duplikat-Filter: Löscht exakte Zeitstempel-Kopien vor der 
-        3-QSO-Limitierung, um Wavelog-Import-Fehler ("Doppelte QSOs") 
-        zu verhindern. Bevorzugt dabei immer eQSL-bestätigte Einträge.
-- v2.3: Sibirien-Fix: Entfernt fälschlicherweise als GridSquare geloggte 
-        "RR73"-Texte aus alten Beständen restlos.
+- v2.1: FT4-Fix integriert (MFSK/FT4).
+- v2.2: Hardcore-Duplikat-Filter (Zeit-Duplikate gelöscht).
+- v2.3: RR73-Geister-Locators entfernt.
+- v2.4: QO-100 Satelliten-Fix (sichert PROP_MODE=SAT und ergänzt SAT_MODE).
 ===========================================================================
 """
 
@@ -58,7 +55,6 @@ def clean_and_upgrade_adif(input_file, output_file):
             is_confirmed = bool(re.search(r'<(?:APP_)?EQSL_QSL_RCVD:\d+>Y', record, re.IGNORECASE))
             exact_key = f"{call}_{band}_{date}_{time}"
             
-            # VIP-Check: Bestätigte überschreiben unbestätigte Duplikate
             if exact_key not in unique_by_time or (is_confirmed and not unique_by_time[exact_key]['is_confirmed']):
                 unique_by_time[exact_key] = {
                     'raw': record,
@@ -72,13 +68,13 @@ def clean_and_upgrade_adif(input_file, output_file):
         grouped_qsos[data['call_band']].append(data)
 
     final_records = []
+    qo100_count = 0
     
     for key, qsos in grouped_qsos.items():
         confirmed_qsos = [q for q in qsos if q['is_confirmed']]
         unconfirmed_qsos = [q for q in qsos if not q['is_confirmed']]
         
         kept_for_this_key = confirmed_qsos.copy()
-        
         needed = 3 - len(kept_for_this_key)
         if needed > 0:
             kept_for_this_key.extend(unconfirmed_qsos[:needed])
@@ -104,27 +100,39 @@ def clean_and_upgrade_adif(input_file, output_file):
             # 4. RR73-GridSquare Fehler restlos entfernen
             rec = re.sub(r'<GRIDSQUARE:\d+>RR73\s*', '', rec, flags=re.IGNORECASE)
             
+            # 5. QO-100 Satelliten-Fix für eQSL
+            is_qo100 = bool(re.search(r'<SAT_NAME:\d+>(QO-100|ESHAIL)', rec, re.IGNORECASE))
+            if not is_qo100 and re.search(r'<BAND:\d+>(13cm|3cm)', rec, re.IGNORECASE):
+                # Wenn das Band 13cm/3cm ist, machen wir es offiziell zum QO-100
+                rec += " <SAT_NAME:6>QO-100"
+                is_qo100 = True
+                
+            if is_qo100:
+                qo100_count += 1
+                if not re.search(r'<PROP_MODE:', rec, re.IGNORECASE):
+                    rec += " <PROP_MODE:3>SAT"
+                if not re.search(r'<SAT_MODE:', rec, re.IGNORECASE):
+                    # Setzt ein leeres SAT_MODE Feld. 
+                    # Falls eQSL hier z.B. ein "X" verlangt, ändere diese Zeile in: rec += " <SAT_MODE:1>X"
+                    rec += " <SAT_MODE:0>"
+            
             final_records.append(rec + " <EOR>\n")
 
     with open(output_file, 'w', encoding='utf-8') as out:
         out.write(header)
         out.writelines(final_records)
 
-    gelesene_eintraege = len(records_raw) - 1
-    
     print("-" * 50)
-    print("Zusammenfassung der ADIF-Bereinigung (v2.3):")
-    print(f"Ursprüngliche Einträge:          {gelesene_eintraege}")
-    print(f"Ohne exakte Zeit-Duplikate:      {len(unique_by_time)}")
+    print("Zusammenfassung der ADIF-Bereinigung (v2.4):")
     print(f"Einträge nach 3-QSO Limit:       {len(final_records)}")
-    print("-> RR73-Geister-Locators wurden erfolgreich gelöscht!")
+    print(f"QO-100 QSOs repariert/bestätigt: {qo100_count}")
     print(f"Gespeichert in:                  '{output_file}'")
     print("-" * 50)
 
 if __name__ == "__main__":
     while True:
         print("\n" + "=" * 50)
-        eingabe = input("Originalen Wavelog ADIF-Export reinziehen (oder 'exit'): ").strip()
+        eingabe = input("ADIF-Export reinziehen (oder 'exit'): ").strip()
         if eingabe.lower() in ['exit', 'quit', 'q', 'ende']:
             break
         eingabe_datei = eingabe.replace('"', '').replace("'", "")
