@@ -13,6 +13,7 @@ SWL FT8/FT4 Live-Logger & ADIF-Generator
 - v3.1: QO-100 Club Fix: FT4 wird nun ADIF-konform als <MODE:4>MFSK 
         und <SUBMODE:3>FT4 exportiert.
 - v3.2: eQSL-Zwang für Satelliten erfüllt (<SAT_MODE:0> in den Export integriert).
+- v3.3: SAT_MODE fixed auf SX
 ===========================================================================
 """
 
@@ -119,9 +120,9 @@ def format_adif_record(date, time, freq_mhz, mode, snr, callsign, target_callsig
     if remote_grid and remote_grid != "RR73": 
         adif_str += f"<GRIDSQUARE:{len(remote_grid)}>{remote_grid} "
         
-    # FIX: Komplette eQSL-Satelliten-Tags inkl. SAT_MODE
+    # FIX: Komplette eQSL-Satelliten-Tags inkl. korrekten SAT_MODE (SX für QO-100)
     if band == "3cm" or (10489.0 <= float(freq_mhz) <= 10490.0):
-        adif_str += "<PROP_MODE:3>SAT <SAT_NAME:6>QO-100 <SAT_MODE:0> "
+        adif_str += "<PROP_MODE:3>SAT <SAT_NAME:6>QO-100 <SAT_MODE:2>SX "
         
     adif_str += (
         f"<QSLMSG:{len(comment)}>{comment} " 

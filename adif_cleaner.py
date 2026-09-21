@@ -9,6 +9,7 @@ Wavelog ADIF Cleaner & eQSL Upgrader
 - v2.2: Hardcore-Duplikat-Filter (Zeit-Duplikate gelöscht).
 - v2.3: RR73-Geister-Locators entfernt.
 - v2.4: QO-100 Satelliten-Fix (sichert PROP_MODE=SAT und ergänzt SAT_MODE).
+- v2.5: Set SAT_MODE = SX
 ===========================================================================
 """
 
@@ -112,9 +113,7 @@ def clean_and_upgrade_adif(input_file, output_file):
                 if not re.search(r'<PROP_MODE:', rec, re.IGNORECASE):
                     rec += " <PROP_MODE:3>SAT"
                 if not re.search(r'<SAT_MODE:', rec, re.IGNORECASE):
-                    # Setzt ein leeres SAT_MODE Feld. 
-                    # Falls eQSL hier z.B. ein "X" verlangt, ändere diese Zeile in: rec += " <SAT_MODE:1>X"
-                    rec += " <SAT_MODE:0>"
+                    rec += " <SAT_MODE:2>SX"
             
             final_records.append(rec + " <EOR>\n")
 
